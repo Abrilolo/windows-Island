@@ -1,0 +1,7 @@
+id = "minimal-bridge"
+name = "Minimal Bridge"
+icon = "paper-plane-tilt"
+size = "wide"
+mode = "live"
+hotkey = "Ctrl+Alt+Space"
+run = ["python", "main.py"]
