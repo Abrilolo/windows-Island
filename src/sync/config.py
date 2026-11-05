@@ -31,7 +31,12 @@ def get_plugin_data_dir(custom_dir: Path | None = None) -> Path:
     else:
         base = Path.home() / "AppData" / "Roaming"
 
-    data_dir = base / "Nook" / "plugin-data" / PLUGIN_ID
+    fenn_root = base / "Fenn"
+    data_dir = (
+        fenn_root / "plugin-data" / PLUGIN_ID
+        if fenn_root.exists()
+        else base / "Nook" / "plugin-data" / PLUGIN_ID
+    )
     try:
         data_dir.mkdir(parents=True, exist_ok=True)
     except OSError:
@@ -39,6 +44,16 @@ def get_plugin_data_dir(custom_dir: Path | None = None) -> Path:
         data_dir = Path.cwd() / ".nook-data"
         data_dir.mkdir(parents=True, exist_ok=True)
     return data_dir
+
+
+def build_phone_ingest_url(ip: str, port: int = DEFAULT_PHONE_PORT) -> str:
+    """Build canonical HTTP POST ingest endpoint for the discovered phone IP."""
+    return f"http://{ip.strip()}:{port}/api/v1/ingest"
+
+
+def build_phone_health_url(ip: str, port: int = DEFAULT_PHONE_PORT) -> str:
+    """Build canonical HTTP GET health endpoint for the discovered phone IP."""
+    return f"http://{ip.strip()}:{port}/api/v1/health"
 
 
 def normalize_phone_url(raw: str) -> str:
@@ -75,6 +90,12 @@ class BridgeConfig(BaseModel):
     phone_ingest_url: str = Field(default=DEFAULT_PHONE_URL)
     auto_sync_captures: bool = Field(default=True)
     request_timeout_sec: float = Field(default=3.5)
+
+    @property
+    def phone_health_url(self) -> str:
+        """Derive `/api/v1/health` URL from the active `phone_ingest_url`."""
+        base = self.phone_ingest_url.split("/api/", 1)[0]
+        return f"{base}/api/v1/health"
 
     @classmethod
     def load(cls, data_dir: Path | None = None) -> BridgeConfig:

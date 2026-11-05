@@ -193,3 +193,81 @@ def test_stdio_live_process_roundtrip(tmp_path: Path) -> None:
     assert len(lines) >= 9
     assert "Pagar la luz a las 18:00" in json.dumps(lines[-2], ensure_ascii=False)
     assert lines[-1] == {"type": "badge", "badge": {"kind": "glyph", "icon": "bell"}}
+
+
+def test_connect_button_discovers_phone_updates_clean_status_and_auto_flushes_outbox(
+    tmp_path: Path, monkeypatch
+) -> None:
+    outbox = OutboxStore(data_dir=tmp_path)
+    config = BridgeConfig.load(tmp_path)
+    stub_dispatcher = _StubDispatcher(config=config, outbox=outbox, online=False)
+
+    # Pre-queue a pending item in outbox.json before connecting
+    outbox.enqueue(
+        raw_text="Gasté 120 en café",
+        payload=IngestPayload(
+            finances=[
+                FinanceItem(
+                    amountCents=12000,
+                    description="Café",
+                    kind=FinanceKind.EXTRA,
+                    category="Comida",
+                )
+            ]
+        ),
+        item_id="pending_1",
+    )
+
+    discovered_ip: list[str | None] = [None]
+    discover_calls: list[int] = []
+
+    def fake_discover(*args, **kwargs):
+        discover_calls.append(1)
+        return discovered_ip[0]
+
+    monkeypatch.setattr("sync.dispatcher.discover_phone", fake_discover)
+
+    # 1) Startup triggers discover_phone() -> offline -> shows "○ Conectar" and button id="connect"
+    state = BridgeState(
+        brain=_StubBrain(),
+        config=config,
+        outbox=outbox,
+        dispatcher=stub_dispatcher,
+        async_inference=False,
+    )
+    assert len(discover_calls) == 1
+    assert state.connected is False
+
+    tile_offline_str = json.dumps(state.build_tile(), ensure_ascii=False)
+    page_offline_str = json.dumps(state.build_page(), ensure_ascii=False)
+    assert "○ Conectar" in tile_offline_str
+    assert '"id": "connect"' in tile_offline_str
+    assert "○ Conectar" in page_offline_str
+    assert '"id": "connect"' in page_offline_str
+    assert len(outbox.load_items()) == 1
+
+    # 2) Phone comes online on new Wi-Fi IP -> user clicks "connect" button ->
+    #    updates IP, sets status to "● Conectado", and auto-flushes outbox.json!
+    discovered_ip[0] = "192.168.1.88"
+    stub_dispatcher.online = True
+
+    changed = state.handle_message(
+        {
+            "type": "event",
+            "id": "connect",
+            "kind": "click",
+        }
+    )
+    assert changed is True
+    assert len(discover_calls) == 2
+    assert state.connected is True
+    assert state.config.phone_ingest_url == "http://192.168.1.88:8765/api/v1/ingest"
+    assert outbox.load_items() == []
+    assert state.pending_items == []
+
+    tile_online_str = json.dumps(state.build_tile(), ensure_ascii=False)
+    page_online_str = json.dumps(state.build_page(), ensure_ascii=False)
+    assert "● Conectado" in tile_online_str
+    assert '"id": "connect"' in tile_online_str
+    assert "● Conectado" in page_online_str
+    assert '"id": "connect"' in page_online_str

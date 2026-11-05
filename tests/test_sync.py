@@ -15,7 +15,14 @@ from contracts.payload import (
     NoteItem,
 )
 from sync.config import BridgeConfig, DEFAULT_PHONE_URL, normalize_phone_url
-from sync.dispatcher import PhoneDispatcher
+from sync.dispatcher import (
+    PhoneConnection,
+    PhoneDispatcher,
+    _try_adb_forward_phone,
+    connect_to_phone,
+    discover_phone,
+    send_message_to_phone,
+)
 from sync.outbox import OutboxStore
 
 
@@ -110,3 +117,150 @@ def test_outbox_atomic_persistence_and_offline_retry(tmp_path: Path, monkeypatch
     assert captured_post["url"] == "http://192.168.3.164:8765/api/v1/ingest"
     assert len(captured_post["payload"]["finances"]) == 1
     assert len(captured_post["payload"]["notes"]) == 1
+
+
+def test_discover_phone_udp_broadcast_saves_ip_and_pings_health(
+    tmp_path: Path, monkeypatch
+) -> None:
+    sent_udp: dict[str, Any] = {}
+    health_requests: list[tuple[str, str]] = []
+
+    class _FakeUDPSocket:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def setsockopt(self, level, optname, value):
+            sent_udp["broadcast_opt"] = (level, optname, value)
+
+        def settimeout(self, timeout):
+            sent_udp["timeout"] = timeout
+
+        def sendto(self, data: bytes, addr: tuple[str, int]):
+            sent_udp["data"] = data.decode("utf-8")
+            sent_udp["addr"] = addr
+
+        def recvfrom(self, bufsize: int):
+            reply = json.dumps(
+                {"status": "ok", "app": "minimal-launcher", "port": 8765}
+            ).encode("utf-8")
+            return reply, ("192.168.1.42", 8765)
+
+    class _FakeHealthResp:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def read(self):
+            return b'{"status":"ok"}'
+
+    def fake_urlopen(req, timeout=None):
+        health_requests.append((req.get_method(), req.full_url))
+        return _FakeHealthResp()
+
+    monkeypatch.setattr("socket.socket", lambda *a, **kw: _FakeUDPSocket())
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    cfg = BridgeConfig.load(tmp_path)
+    ip = discover_phone(port=8765, timeout=1.5, config=cfg, data_dir=tmp_path)
+
+    assert ip == "192.168.1.42"
+    assert sent_udp["data"] == "NOOK_DISCOVER"
+    assert sent_udp["addr"] == ("255.255.255.255", 8765)
+    assert sent_udp["timeout"] == 1.5
+    assert cfg.phone_ingest_url == "http://192.168.1.42:8765/api/v1/ingest"
+    assert BridgeConfig.load(tmp_path).phone_ingest_url == "http://192.168.1.42:8765/api/v1/ingest"
+    assert health_requests == [("GET", "http://192.168.1.42:8765/api/v1/health")]
+
+
+def test_adb_forward_fallback_when_wifi_isolated(monkeypatch) -> None:
+    calls: list[str] = []
+
+    def fake_health(ip: str, port: int = 8765, timeout: float = 1.5) -> bool:
+        calls.append(f"health:{ip}:{port}")
+        # First check before adb forward fails, second check after adb forward succeeds
+        return len(calls) >= 2
+
+    class _FakeProc:
+        returncode = 0
+
+    def fake_run(cmd, **kwargs):
+        calls.append(" ".join(cmd))
+        return _FakeProc()
+
+    monkeypatch.setattr("sync.dispatcher.ping_phone_health", fake_health)
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    resolved = _try_adb_forward_phone(port=8765, timeout=1.0)
+    assert resolved == "127.0.0.1"
+    assert calls == [
+        "health:127.0.0.1:8765",
+        "adb forward tcp:8765 tcp:8765",
+        "health:127.0.0.1:8765",
+    ]
+
+
+def test_reusable_connect_to_phone_and_send_message(tmp_path: Path, monkeypatch) -> None:
+    def fake_adb_forward(port: int = 8765, timeout: float = 1.5) -> str | None:
+        return "127.0.0.1"
+
+    class _FakeDeadSocket:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def setsockopt(self, *args):
+            pass
+
+        def settimeout(self, *args):
+            pass
+
+        def sendto(self, *args):
+            pass
+
+        def recvfrom(self, *args):
+            raise TimeoutError("UDP blocked")
+
+    monkeypatch.setattr("socket.socket", lambda *a, **kw: _FakeDeadSocket())
+    monkeypatch.setattr("sync.phone_connector.ping_phone_health", lambda *a, **kw: False)
+    monkeypatch.setattr("sync.phone_connector._try_adb_forward_phone", fake_adb_forward)
+
+    cfg = BridgeConfig.load(tmp_path)
+    conn = connect_to_phone(config=cfg, data_dir=tmp_path, allow_adb=True)
+    assert isinstance(conn, PhoneConnection)
+    assert conn.connected is True
+    assert conn.ip == "127.0.0.1"
+    assert conn.transport == "adb"
+    assert conn.ingest_url == "http://127.0.0.1:8765/api/v1/ingest"
+    assert conn.message_url == "http://127.0.0.1:8765/api/v1/message"
+
+    sent_req: dict[str, Any] = {}
+
+    class _FakeResp:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+    def fake_urlopen(req, timeout=None):
+        sent_req["url"] = req.full_url
+        sent_req["body"] = json.loads(req.data.decode("utf-8"))
+        return _FakeResp()
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    ok, err = send_message_to_phone("Sesión terminada", source="Claude", config=cfg, data_dir=tmp_path)
+    assert ok is True
+    assert err is None
+    assert sent_req["url"] == "http://127.0.0.1:8765/api/v1/message"
+    assert sent_req["body"] == {"from": "Claude", "text": "Sesión terminada"}

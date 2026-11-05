@@ -1,15 +1,54 @@
-"""HTTP POST dispatcher to the Galaxy S24+ (`Minimal Launcher`) with offline outbox fallback."""
+"""UDP discovery and HTTP POST dispatcher to the Galaxy S24+ (`Minimal Launcher`) with offline outbox fallback."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+from pathlib import Path
 import urllib.error
 import urllib.request
 
 from contracts.payload import IngestPayload
-from sync.config import BridgeConfig
+from sync.config import (
+    BridgeConfig,
+    DEFAULT_PHONE_PORT,
+    build_phone_health_url,
+    build_phone_ingest_url,
+)
 from sync.outbox import OutboxStore, QueuedItem
+from sync.phone_connector import (
+    BROADCAST_ADDR,
+    DISCOVER_MAGIC,
+    PhoneConnection,
+    _detect_local_ipv4,
+    _extract_ip_from_url,
+    _get_arp_neighbor_ips,
+    _try_adb_forward_phone,
+    connect_to_phone,
+    discover_phone,
+    ping_phone_health,
+    post_to_phone,
+    send_message_to_phone,
+)
+
+__all__ = [
+    "BROADCAST_ADDR",
+    "DISCOVER_MAGIC",
+    "DispatchResult",
+    "PhoneConnection",
+    "PhoneDispatcher",
+    "_detect_local_ipv4",
+    "_extract_ip_from_url",
+    "_get_arp_neighbor_ips",
+    "_try_adb_forward_phone",
+    "build_phone_health_url",
+    "build_phone_ingest_url",
+    "connect_to_phone",
+    "discover_phone",
+    "ping_phone_health",
+    "post_to_phone",
+    "send_message_to_phone",
+]
 
 
 @dataclass
@@ -25,7 +64,7 @@ class DispatchResult:
 
 
 class PhoneDispatcher:
-    """Sends merged `IngestPayload` batches to Minimal Launcher over LAN / Tailscale."""
+    """Sends merged `IngestPayload` batches to Minimal Launcher over LAN / Wi-Fi / ADB."""
 
     def __init__(
         self,
@@ -35,6 +74,32 @@ class PhoneDispatcher:
         self.config = config or BridgeConfig.load()
         self.outbox = outbox or OutboxStore()
 
+    def connect_phone(
+        self,
+        port: int = DEFAULT_PHONE_PORT,
+        timeout: float = 1.5,
+    ) -> PhoneConnection:
+        """Connect to the S24+ via UDP LAN, HTTP LAN, or ADB tunnel and update `self.config`."""
+        return connect_to_phone(
+            port=port,
+            timeout=timeout,
+            config=self.config,
+            data_dir=self.outbox.data_dir,
+        )
+
+    def discover_phone(
+        self,
+        port: int = DEFAULT_PHONE_PORT,
+        timeout: float = 1.5,
+    ) -> str | None:
+        """Discover the S24+ on the local network or ADB tunnel and update `self.config`."""
+        return discover_phone(
+            port=port,
+            timeout=timeout,
+            config=self.config,
+            data_dir=self.outbox.data_dir,
+        )
+
     def post_payload(self, payload: IngestPayload) -> tuple[bool, str | None]:
         """Send a single `IngestPayload` via HTTP POST to `config.phone_ingest_url`."""
         body_bytes = json.dumps(
@@ -42,12 +107,14 @@ class PhoneDispatcher:
             ensure_ascii=False,
         ).encode("utf-8")
 
+        client_ip = _detect_local_ipv4() or "PC"
         req = urllib.request.Request(
             self.config.phone_ingest_url,
             data=body_bytes,
             headers={
                 "Content-Type": "application/json; charset=utf-8",
                 "User-Agent": "nook-bridge/0.1.0",
+                "X-Nook-Client-Ip": client_ip,
             },
             method="POST",
         )
@@ -72,7 +139,7 @@ class PhoneDispatcher:
             return False, str(exc)
 
     def flush_outbox(self, items: list[QueuedItem] | None = None) -> DispatchResult:
-        """Merge all queued items into one Room v6 payload and POST to the Galaxy S24+.
+        """Merge all queued items into one Room payload and POST to the Galaxy S24+.
 
         - On HTTP 2xx: removes delivered items from `outbox.json`.
         - On network error: keeps items in `outbox.json` and records the failure reason.

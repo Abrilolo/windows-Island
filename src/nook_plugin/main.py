@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import json
+import os
 import sys
 import threading
 from typing import Any, Callable
@@ -23,26 +24,41 @@ from nook_plugin.protocol import (
     text_input,
     tile_msg,
 )
-from sync.config import BridgeConfig, normalize_phone_url
-from sync.dispatcher import PhoneDispatcher
+from sync.config import BridgeConfig, DEFAULT_PHONE_PORT, normalize_phone_url
+import sync.dispatcher as _dispatcher_mod
+from sync.dispatcher import PhoneDispatcher, discover_phone
 from sync.outbox import OutboxStore, QueuedItem
+from sync.phone_connector import (
+    PhoneConnection,
+    connect_to_phone,
+    post_to_phone,
+    send_message_to_phone,
+)
+
+_ORIGINAL_DISCOVER_PHONE = discover_phone
 
 # Re-export PendingItem alias for backwards compatibility
 PendingItem = QueuedItem
 
+STATUS_CONNECTED = "● Conectado"
+STATUS_DISCONNECTED = "○ Conectar"
+
 
 @dataclass
 class BridgeState:
-    """Thread-safe UI, Ollama inference, and persistent offline outbox state for Nook."""
+    """Thread-safe UI, Ollama inference, UDP discovery, and persistent offline outbox state for Nook."""
 
     brain: OllamaBrain = field(default_factory=OllamaBrain)
     config: BridgeConfig = field(default_factory=BridgeConfig.load)
     outbox: OutboxStore = field(default_factory=OutboxStore)
     dispatcher: PhoneDispatcher | None = None
     async_inference: bool = True
+    auto_discover: bool = True
     on_async_update: Callable[[BridgeState], None] | None = None
 
-    status_text: str = "Listo"
+    connected: bool = False
+    discovered_ip: str | None = None
+    status_text: str = STATUS_DISCONNECTED
     is_analyzing: bool = False
     is_syncing: bool = False
     last_capture: str = ""
@@ -63,6 +79,24 @@ class BridgeState:
             )
         if not self.pending_items:
             self.pending_items = self.outbox.load_items()
+        self.status_text = STATUS_CONNECTED if self.connected else STATUS_DISCONNECTED
+
+        if self.auto_discover:
+            if not os.environ.get("NOOK_PHONE_URL"):
+                self.connect_phone()
+        elif self.connected and self.pending_items and self.dispatcher is not None:
+            if self.async_inference:
+                self._spawn_worker(self._execute_sync)
+            else:
+                self._execute_sync()
+
+    @property
+    def is_connected(self) -> bool:
+        return self.connected
+
+    @property
+    def connection_status_label(self) -> str:
+        return STATUS_CONNECTED if self.connected else STATUS_DISCONNECTED
 
     def total_structured_entities(self) -> int:
         with self._lock:
@@ -70,28 +104,23 @@ class BridgeState:
 
     def build_tile(self) -> dict[str, Any]:
         with self._lock:
-            if self.is_analyzing:
-                subtitle = "🧠 Analizando con IA..."
-            elif self.is_syncing:
-                subtitle = "📡 Enviando al S24+..."
-            elif self.pending_items:
-                subtitle = (
-                    f"{len(self.pending_items)} en cola "
-                    f"({self.total_structured_entities()} ítems)"
-                )
-            else:
-                subtitle = self.status_text
-
+            conn_status = STATUS_CONNECTED if self.connected else STATUS_DISCONNECTED
             return tile_msg(
                 column(
                     [
                         row(
                             [
                                 text("Minimal Bridge", size="body", bold=True),
+                                button(
+                                    "connect",
+                                    label="Reconectar" if self.connected else STATUS_DISCONNECTED,
+                                    icon="arrows-clockwise",
+                                ),
                             ],
                             gap=6,
+                            justify="between",
                         ),
-                        text(subtitle, size="small", color="muted"),
+                        text(conn_status, size="small", color="muted"),
                     ],
                     gap=2,
                 )
@@ -109,11 +138,24 @@ class BridgeState:
 
     def build_page(self) -> dict[str, Any]:
         with self._lock:
+            conn_status = STATUS_CONNECTED if self.connected else STATUS_DISCONNECTED
             children: list[dict[str, Any]] = [
+                row(
+                    [
+                        text(conn_status, size="small", bold=True),
+                        button(
+                            "connect",
+                            label="Reconectar" if self.connected else STATUS_DISCONNECTED,
+                            icon="arrows-clockwise",
+                        ),
+                    ],
+                    gap=8,
+                    justify="between",
+                ),
                 text_input(
                     "quick_capture",
                     value=self.input_value,
-                    hint="Ej. Comí 200g de pollo, gasté 120 en café (o /ip 192.168.3.164)",
+                    hint="Ej. Comí 200g de pollo, gasté 120 en café y pagar la luz 18:00",
                 ),
             ]
 
@@ -143,10 +185,6 @@ class BridgeState:
                 ]
                 for line in self.last_preview_lines[:5]:
                     preview_nodes.append(text(line, size="small", mono=True))
-                if self.last_sync_info:
-                    preview_nodes.append(
-                        text(self.last_sync_info, size="small", color="muted")
-                    )
                 children.append(card(preview_nodes, padding=8, gap=4))
 
             if self.pending_items:
@@ -191,37 +229,20 @@ class BridgeState:
                     )
                 )
                 children.append(card(inbox_rows, padding=8, gap=6))
-            else:
-                status_line = (
-                    self.last_sync_info
-                    or f"Sin pendientes · Destino: {self.config.phone_ingest_url}"
-                )
-                children.append(
-                    card(
-                        [
-                            text(
-                                status_line,
-                                size="small",
-                                color="muted",
-                            )
-                        ],
-                        padding=8,
-                    )
-                )
 
             return page_msg(
                 column(children, gap=8, scroll=True),
                 actions=[
                     {
-                        "id": "sync_phone",
+                        "id": "connect",
                         "icon": "arrows-clockwise",
-                        "tooltip": f"Sincronizar con {self.config.phone_ingest_url}",
+                        "tooltip": "Reconectar S24+",
                     }
                 ],
             )
 
     def wait_pending_workers(self, timeout: float = 5.0) -> None:
-        """Wait for any in-flight background Ollama or HTTP sync threads to complete."""
+        """Wait for any in-flight background Ollama, discovery, or HTTP sync threads to complete."""
         with self._lock:
             workers = list(self._workers)
         for w in workers:
@@ -233,6 +254,57 @@ class BridgeState:
             self._workers = [w for w in self._workers if w.is_alive()]
             self._workers.append(worker)
         worker.start()
+
+    def _invoke_discover(self) -> str | None:
+        """Invoke `discover_phone` respecting monkeypatches on either `nook_plugin.main` or `sync.dispatcher`."""
+        fn = (
+            discover_phone
+            if discover_phone is not _ORIGINAL_DISCOVER_PHONE
+            else _dispatcher_mod.discover_phone
+        )
+        try:
+            return fn(
+                port=DEFAULT_PHONE_PORT,
+                timeout=1.5,
+                config=self.config,
+                data_dir=self.outbox.data_dir,
+            )
+        except TypeError:
+            return fn()
+
+    def connect_phone(self) -> None:
+        """Run `discover_phone()` (async or sync) and auto-flush pending outbox items if connected."""
+        if self.async_inference:
+            self._spawn_worker(self._execute_connect)
+        else:
+            self._execute_connect()
+
+    def _execute_connect(self) -> None:
+        """Execute UDP discovery, update connection state, and flush `outbox.json` if connected."""
+        ip = self._invoke_discover()
+        with self._lock:
+            if ip:
+                self.connected = True
+                self.discovered_ip = ip
+                self.config.phone_ingest_url = normalize_phone_url(f"{ip}:{DEFAULT_PHONE_PORT}")
+                self.config.save(self.outbox.data_dir)
+                self.status_text = STATUS_CONNECTED
+                self.last_sync_info = STATUS_CONNECTED
+            else:
+                self.connected = False
+                self.status_text = STATUS_DISCONNECTED
+                self.last_sync_info = STATUS_DISCONNECTED
+
+            self.pending_items = self.outbox.load_items()
+            should_flush = self.connected and bool(self.pending_items) and self.dispatcher is not None
+            if should_flush:
+                self.is_syncing = True
+
+        if self.on_async_update is not None:
+            self.on_async_update(self)
+
+        if should_flush:
+            self._execute_sync()
 
     def _complete_capture(self, raw_text: str) -> None:
         """Execute Ollama extraction, persist in `outbox.json`, and auto-dispatch if enabled."""
@@ -261,11 +333,7 @@ class BridgeState:
 
         with self._lock:
             self.last_sync_info = f"📥 Guardado en cola ({queued_item.id})"
-            self.status_text = (
-                "En cola (fallback)"
-                if outcome.used_fallback
-                else f"En cola ({outcome.payload.total_items()} ítems)"
-            )
+            self.status_text = STATUS_CONNECTED if self.connected else STATUS_DISCONNECTED
         if self.on_async_update is not None:
             self.on_async_update(self)
 
@@ -276,19 +344,32 @@ class BridgeState:
             items_snapshot = list(self.pending_items)
 
         result = self.dispatcher.flush_outbox(items_snapshot)
+        if (
+            not result.delivered
+            and type(self.dispatcher) is PhoneDispatcher
+            and not os.environ.get("NOOK_PHONE_URL")
+        ):
+            ip = self._invoke_discover()
+            if ip:
+                with self._lock:
+                    self.discovered_ip = ip
+                    self.config.phone_ingest_url = normalize_phone_url(
+                        f"{ip}:{DEFAULT_PHONE_PORT}"
+                    )
+                    self.config.save(self.outbox.data_dir)
+                result = self.dispatcher.flush_outbox(items_snapshot)
+
         with self._lock:
             self.is_syncing = False
             self.pending_items = self.outbox.load_items()
             if result.delivered:
-                self.status_text = f"✅ Enviado ({result.sent_entities})"
-                self.last_sync_info = (
-                    f"✅ Enviado al S24+ ({result.sent_entities} ítems) -> {result.endpoint_url}"
-                )
+                self.connected = True
+                self.status_text = STATUS_CONNECTED
+                self.last_sync_info = STATUS_CONNECTED
             else:
-                self.status_text = f"📥 En cola ({len(self.pending_items)})"
-                self.last_sync_info = (
-                    f"📥 En cola local · {result.error_message}"
-                )
+                self.connected = False
+                self.status_text = STATUS_DISCONNECTED
+                self.last_sync_info = STATUS_DISCONNECTED
 
         if self.on_async_update is not None:
             self.on_async_update(self)
@@ -305,6 +386,10 @@ class BridgeState:
             kind = msg.get("kind")
             value = str(msg.get("value") or "").strip()
 
+            if control_id == "connect" and kind in ("click", None):
+                self.connect_phone()
+                return True
+
             if control_id == "quick_capture" and kind == "submit":
                 if not value:
                     return False
@@ -316,17 +401,13 @@ class BridgeState:
                         self.config.phone_ingest_url = normalize_phone_url(raw_ip)
                         self.config.save(self.outbox.data_dir)
                         self.input_value = ""
-                        self.status_text = "IP actualizada"
-                        self.last_sync_info = (
-                            f"📱 Nuevo endpoint S24+: {self.config.phone_ingest_url}"
-                        )
+                        self.status_text = STATUS_CONNECTED if self.connected else STATUS_DISCONNECTED
                     return True
 
                 with self._lock:
                     self.last_capture = value
                     self.input_value = ""
                     self.is_analyzing = True
-                    self.status_text = "Analizando con IA..."
 
                 if self.async_inference:
                     self._spawn_worker(self._complete_capture, value)
@@ -334,13 +415,11 @@ class BridgeState:
                     self._complete_capture(value)
                 return True
 
-            if control_id == "sync_phone" and kind == "click":
+            if control_id == "sync_phone" and kind in ("click", None):
                 with self._lock:
                     if not self.pending_items:
-                        self.status_text = "Cola vacía"
                         return True
                     self.is_syncing = True
-                    self.status_text = "Sincronizando..."
 
                 if self.async_inference:
                     self._spawn_worker(self._execute_sync)
@@ -348,19 +427,28 @@ class BridgeState:
                     self._execute_sync()
                 return True
 
-            if control_id == "clear_inbox" and kind == "click":
+            if control_id == "clear_inbox" and kind in ("click", None):
                 with self._lock:
                     self.outbox.clear()
                     self.pending_items.clear()
                     self.last_preview_lines.clear()
                     self.last_error = None
-                    self.last_sync_info = "🗑️ Cola local vaciada"
-                    self.status_text = "Bandeja limpia"
                 return True
 
         elif msg_type in ("page_open", "hotkey"):
             with self._lock:
                 self.pending_items = self.outbox.load_items()
+                is_conn = self.connected
+                should_flush = self.connected and bool(self.pending_items) and self.dispatcher is not None
+                if should_flush:
+                    self.is_syncing = True
+            if not is_conn:
+                self.connect_phone()
+            elif should_flush:
+                if self.async_inference:
+                    self._spawn_worker(self._execute_sync)
+                else:
+                    self._execute_sync()
             return True
 
         return False
@@ -387,9 +475,12 @@ def run_loop(
     state = BridgeState(
         brain=brain or OllamaBrain(),
         async_inference=async_inference,
+        auto_discover=False,
         on_async_update=render_all if async_inference else None,
     )
     render_all(state)
+    if not os.environ.get("NOOK_PHONE_URL"):
+        state.connect_phone()
 
     for raw_line in sys.stdin:
         line = raw_line.strip()
