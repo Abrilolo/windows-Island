@@ -13,7 +13,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PLUGIN_DIRS = sorted(p for p in (REPO_ROOT / "plugins").iterdir() if (p / "plugin.toml").is_file())
-AGENT_PLUGINS = ["claude-agent", "codex-agent", "gemini-agent"]
+AGENT_PLUGINS = ["ai-agents"]
 
 
 @pytest.mark.parametrize("plugin_dir", PLUGIN_DIRS, ids=lambda p: p.name)
@@ -40,6 +40,8 @@ def test_agent_plugin_boots_and_draws_tile(plugin_id: str, tmp_path: Path) -> No
     env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
     for var in ("AGENT_MONITOR_CLAUDE_DIR", "AGENT_MONITOR_CODEX_DIR", "AGENT_MONITOR_GEMINI_DIR"):
         env[var] = str(tmp_path / "empty-logs")
+    env["FENN_DATA_DIR"] = str(tmp_path / "data")
+    env["FENN_AGENT_HOOK_PORT"] = "0"
 
     proc = subprocess.run(
         [sys.executable, str(REPO_ROOT / "plugins" / plugin_id / "main.py")],
@@ -54,3 +56,4 @@ def test_agent_plugin_boots_and_draws_tile(plugin_id: str, tmp_path: Path) -> No
     assert proc.returncode == 0, proc.stderr
     messages = [json.loads(line) for line in proc.stdout.splitlines() if line.strip()]
     assert {m["type"] for m in messages} >= {"tile", "page", "badge"}
+    assert (tmp_path / "data" / "hooks.json").is_file()  # hook receiver started

@@ -1,7 +1,0 @@
-id = "codex-agent"
-name = "Codex Monitor"
-icon = "terminal-window"
-size = "wide"
-mode = "live"
-hotkey = "Ctrl+Alt+Shift+X"
-run = ["python", "main.py"]

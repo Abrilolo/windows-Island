@@ -19,7 +19,7 @@ Recordatorio: Fenn limita **la UI**, no la lógica. Casi todo lo que aparece com
 
 | Módulo | Estado | Fase | Bloqueo principal |
 |---|---|---|---|
-| A1 AI Agents | ✅ (Gemini ⚠️) | 1 | Ninguno para Claude/Codex |
+| A1 AI Agents | 🟢 aprobaciones hechas (Gemini ⚠️) | 1 | — |
 | A2 Git Control | ✅ | 2 | Solo polling (sin webhooks) |
 | A3 Dev Center | ✅ / ❌ terminal embebida | 2 | No se puede mostrar una terminal |
 | A4 Automation Hub | ✅ con lista blanca | 3 | Seguridad, no técnico |
@@ -41,36 +41,38 @@ Recordatorio: Fenn limita **la UI**, no la lógica. Casi todo lo que aparece com
 |---|---|---|
 | Sesiones recientes, duración, rendimiento de Claude/Codex/Gemini | 🟢 | `core/agents/` lee los logs de sesión locales. |
 | Saber al instante que una sesión empezó, terminó o se detuvo | ✅ | Hooks `SessionStart`, `Stop`, `SessionEnd`, `Notification` (Claude Code y Codex los tienen). |
-| **Aprobar o rechazar desde la isla** (Claude Code) | ✅ | Hook `PermissionRequest`. Corre *en paralelo* al diálogo de la terminal: **el primero que decide gana**, así que la terminal sigue sirviendo de respaldo. Claude Code acepta hooks tipo `http` (POST directo a un servidor local) y tipo `command`. Timeout por defecto de 600 s. |
-| **Aprobar o rechazar desde la isla** (Codex) | ✅ | Hook `PermissionRequest` con `{"decision": {"behavior": "allow" \| "deny"}}`. Codex solo soporta hooks `command` (no `http`): un script Python pequeño que llama al servidor local y espera. Codex pide revisar y confiar (`/hooks`) cada hook nuevo o modificado. |
+| **Aprobar o rechazar desde la isla** (Claude Code) | 🟢 | Hook `PermissionRequest` tipo `command`. **Corrección:** en la terminal interactiva el diálogo aparece cuando el hook termina sin decidir (lo de "gana el primero que decide" solo aplica a hosts del SDK con `canUseTool`). Por eso la isla espera como máximo 120 s y tiene un botón *Terminal* para soltarlo antes. |
+| **Aprobar o rechazar desde la isla** (Codex) | 🟢 | Mismo hook y mismo script. Si el hook no decide, Codex sigue con su diálogo normal. Codex pide revisar y confiar (`/hooks`) cada hook nuevo o modificado. |
 | Gemini CLI: eventos y aprobaciones | ⚠️ | **Por verificar** si su sistema de hooks permite decidir aprobaciones. Mientras tanto: solo lectura de logs (ya existe). |
 | Ver el diff o el resultado | ⚠️ | No hay visor de diffs. Mostrar un resumen (`+45 −12`, archivos) con `text mono` y un botón que haga `open` del archivo o carpeta en VS Code. |
 | Ver la terminal del agente en vivo | ❌ | Fenn no puede incrustar una terminal y leer la terminal de otro proceso es frágil. Se usan los hooks. |
 | Escribir un prompt al agente desde la isla | ❌ (por ahora) | No hay una API estable para inyectar texto en una sesión interactiva abierta. Una sesión *nueva* no interactiva (`claude -p`, `codex exec`) sí es posible, pero eso es otra funcionalidad. |
 
-### Diseño recomendado para las aprobaciones
+### Diseño implementado (Fase 1)
 
-No hace falta un backend FastAPI aparte para esto. El plugin `agent-monitor` corre en modo `live`, así que **Fenn ya mantiene vivo ese proceso** y lo reinicia si se cae. Ese mismo proceso puede escuchar en `127.0.0.1:<puerto>`:
+No hace falta un backend FastAPI aparte. El plugin `ai-agents` corre en modo `live`, así que **Fenn ya mantiene vivo ese proceso** y lo reinicia si se cae. Ese proceso escucha en `127.0.0.1`:
 
 ```
-Claude Code ──(hook http POST)──┐
-Codex ──(hook command: script)──┤
-                                ▼
-            plugin agent-monitor (live) · HTTP en 127.0.0.1:8787
-                 │  1. guarda la solicitud pendiente
-                 │  2. badge pulse + show → abre el notch en la page
-                 │  3. el usuario pulsa Aprobar / Rechazar
-                 ▼
-            responde al hook → el agente continúa
+Claude Code ─(hook command)─┐
+                            ├─▶ hooks/fenn_hook.py ──▶ ai-agents · 127.0.0.1:8787
+Codex ───────(hook command)─┘   (añade fenn_agent)
+                                                           1. guarda la solicitud (ApprovalBroker)
+                                                           2. badge pulse + show → abre la isla
+                                                           3. Aprobar / Rechazar / Terminal
+          ◀──────────── allow | deny | (nada = diálogo normal) ────────────┘
 ```
 
-Si Fenn no está corriendo, la conexión falla, el hook termina sin decidir y aparece el diálogo normal de la terminal. **Nunca se queda bloqueado.**
+- Código: `core/agents/approvals.py` (broker), `core/agents/hook_server.py` (HTTP), `hooks/fenn_hook.py` (script del hook, solo librería estándar), `scripts/install_hooks.py` (registro en la config de los agentes).
+- En cada arranque, el plugin publica puerto y token en `%APPDATA%\Fenn\plugin-datai-agents\hooks.json`. El script lo lee y manda el token en `X-Fenn-Token`. Solo escucha en `127.0.0.1`.
+- **Fail-open:** si Fenn no corre, el archivo no existe, el puerto está cerrado o algo falla, el hook sale al instante sin decidir y aparece el diálogo normal. **Nunca bloquea al agente ni decide por ti.**
+- Espera máxima: 120 s (`FENN_AGENT_APPROVAL_TIMEOUT`); el hook se registra con timeout de 150 s.
+- `Stop` y `Notification` se envían en modo `async` y actualizan "Último evento" en el tile.
+- Verificado de punta a punta el 2026-11-06: solicitud de prueba → isla → *Aprobar* → el hook devolvió `allow`.
 
-Reglas:
+Pendientes conocidos:
 
-- Puerto distinto de **8765** (ese es el del teléfono). Propuesta: `8787`.
-- Escuchar solo en `127.0.0.1` y exigir un token compartido (archivo en `FENN_DATA_DIR`) para que otro programa local no pueda aprobar.
-- Si el usuario no responde en N segundos, no decidir (devolver nada) para que gane la terminal.
+- Si hay **otro** hook `PermissionRequest` que también decide (por ejemplo TwoCode), los dos corren a la vez y la documentación no dice cuál gana. Conviene que solo uno decida.
+- Gemini: sin hooks de aprobación (por verificar).
 
 ---
 
@@ -142,7 +144,7 @@ Hay que cuidar el rate limit: el polling debe ser moderado y con caché.
 
 | Función | Estado | Cómo |
 |---|---|---|
-| Estado y conexión del teléfono | 🟢 | `connect_to_phone()`. |
+| Estado y conexión del teléfono | 🟢 hecho | Tile y página "Device Center" en `plugins/minimal-bridge`: estado, enlace USB/ADB o Wi-Fi, cola y última sync. |
 | Batería del teléfono | ⚠️ | Solo si el launcher la expone por la API. |
 | Volumen y mute del PC | ✅ | `pycaw` (Core Audio). |
 | Cambiar el dispositivo de salida de audio | ⚠️ | Windows no tiene una API pública oficial. Se usa `AudioDeviceCmdlets` (PowerShell) o la interfaz no documentada `IPolicyConfig`. |

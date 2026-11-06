@@ -195,13 +195,13 @@ Una regla fundamental: los plugins deben consultar el estado al backend; no debe
 Imagina que Codex termina una tarea:
 
 1. Codex dispara su hook `Stop` (o `PermissionRequest` si necesita aprobación).
-2. El script del hook hace POST al HTTP local del plugin `agent-monitor`.
+2. `hooks/fenn_hook.py` hace POST al HTTP local del plugin `ai-agents` (`127.0.0.1:8787`), indicando el agente.
 3. El plugin actualiza el estado de la sesión (y lo guarda en SQLite).
 4. El plugin envía a Fenn por stdout un `tile`, un `badge pulse` y, si es una alerta, `show`.
 5. El módulo AI Agents muestra que la tarea terminó.
 6. Puedes abrir el resultado (`open` en VS Code), revisar los cambios o ir al repositorio.
 
-Para los agentes utilizaría las integraciones oficiales disponibles en lugar de intentar leer constantemente sus terminales. **Verificado:** Claude Code y Codex tienen hooks `PermissionRequest` capaces de aprobar o rechazar; en Claude Code el hook corre en paralelo al diálogo de la terminal y gana el primero que decide.
+Para los agentes utilizaría las integraciones oficiales disponibles en lugar de intentar leer constantemente sus terminales. **Verificado:** Claude Code y Codex tienen hooks `PermissionRequest` capaces de aprobar o rechazar. El diálogo de la terminal aparece cuando el hook termina sin decidir, así que la isla espera como máximo 120 s y ofrece un botón *Terminal*.
 
 ## 5. Roadmap de implementación
 
@@ -215,14 +215,16 @@ No intentaría desarrollar los diez módulos desde el primer día. Los construir
    - [✅] Definir diseño, colores e iconos ([docs/design-system.md](docs/design-system.md)).
    - [✅] Reorganizar el repo: `core/` + un `plugin.toml` por plugin (sección 6).
    - [➖] Instalar la skill `fenn-plugin` y usar su checker antes de desplegar.
-   - [➖] Comprobar un hook de Claude Code → HTTP local del plugin → `show` en la isla.
+   - [✅] Comprobar un hook → HTTP local del plugin → `show` en la isla (probado 2026-11-06).
    Primero
 2. Fase 1 — AI Control Center
-   - Detectar sesiones de Codex y Claude Code.
-   - Mostrar estado de cada agente.
-   - Mostrar tareas pendientes y finalizadas.
-   - Gestionar solicitudes de aprobación.
-   - Acceder a los resultados.
+   - [✅] Detectar sesiones de Codex y Claude Code (logs locales).
+   - [✅] Mostrar estado de cada agente (tile + último evento por hook `Stop` / `Notification`).
+   - [✅] Gestionar solicitudes de aprobación: Aprobar / Rechazar / Terminal desde la isla.
+   - [➖] Registrar los hooks en Claude Code y Codex (`scripts/install_hooks.py --apply`).
+   - [➖] Probar con una sesión real de Claude Code y de Codex.
+   - [➖] Mostrar tareas pendientes y finalizadas.
+   - [➖] Acceder a los resultados (`open` del proyecto o los archivos tocados en VS Code).
    Es la primera integración que desarrollaría porque demuestra el valor de tener una isla inteligente.
 3. Fase 2 — Developer Center
    - GitHub y GitLab.
@@ -307,12 +309,10 @@ nook-bridge/
 │   ├── agents/              # parsers de logs + plugin monitor (+ receptor de hooks en Fase 1)
 │   └── storage/             # SQLite, cuando haga falta
 ├── plugins/
-│   ├── minimal-bridge/      # plugin.toml + main.py + minimal_bridge/ (lógica propia)
-│   ├── claude-agent/        # un monitor por agente; comparten core/agents
-│   ├── codex-agent/
-│   ├── gemini-agent/
+│   ├── minimal-bridge/      # "Device Center": plugin.toml + main.py + minimal_bridge/ (lógica propia)
+│   ├── ai-agents/           # A1: Claude Code + Codex + Gemini en un tile (core/agents)
 │   └── …                    # uno por módulo, a medida que se construyan
-├── hooks/                   # scripts que registran Claude Code / Codex (Fase 1)
+├── hooks/fenn_hook.py       # script que Claude Code / Codex ejecutan en cada hook (Fase 1)
 ├── engine/                  # FastAPI, solo si llega a hacer falta
 ├── scripts/deploy.ps1       # despliega cada carpeta de plugins/ + core/
 ├── docs/

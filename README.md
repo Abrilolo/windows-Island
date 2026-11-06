@@ -20,10 +20,8 @@ core/                     # librería compartida que importan todos los plugins
 ├── agents/               # parsers de sesiones Claude / Codex / Gemini + plugin monitor
 └── mail/                 # (pendiente) escáner IMAP
 plugins/                  # una carpeta = un plugin de Fenn (plugin.toml + main.py)
-├── minimal-bridge/       # notas rápidas → Ollama → Minimal Launcher
-├── claude-agent/         # monitor de sesiones de Claude Code
-├── codex-agent/          # monitor de sesiones de Codex
-└── gemini-agent/         # monitor de sesiones de Gemini
+├── minimal-bridge/       # "Device Center": teléfono + notas rápidas → Ollama → Minimal Launcher
+└── ai-agents/            # Claude Code + Codex + Gemini: actividad, sesiones y aprobaciones
 scripts/                  # deploy, setup, utilidades
 tests/
 docs/
@@ -69,9 +67,11 @@ ok, err = post_to_phone({"notes": [{"category": "WORK", "text": "Revisar PR"}]})
 
 ```powershell
 .\scripts\deploy.ps1                                  # solo minimal-bridge
-.\scripts\deploy.ps1 -Plugin claude-agent,codex-agent # plugins concretos
+.\scripts\deploy.ps1 -Plugin ai-agents,minimal-bridge # plugins concretos
 .\scripts\deploy.ps1 -All                             # todos los de plugins/
 ```
+
+Cierra Fenn antes de desplegar un plugin que esté corriendo: Windows bloquea su carpeta. Luego vuelve a abrirlo.
 
 Copia `plugins/<id>/` + `core/` a `%APPDATA%\Fenn\plugins\<id>` y apunta `run` al Python del `.venv`.
 
@@ -79,16 +79,33 @@ Destino único: `%APPDATA%\Fenn\plugins`. Los datos (`%APPDATA%\Fenn\plugin-data
 
 ## Estado del entorno (2026-11-06)
 
-- Instalados en Fenn desde este repo: `minimal-bridge`, `claude-agent` y `codex-agent`, todos con el `.venv` del repo. `gemini-agent` existe en el repo pero no está desplegado.
+- Instalados en Fenn desde este repo: `minimal-bridge` (se muestra como "Device Center") y `ai-agents` (un solo tile para Claude Code, Codex y Gemini), con el `.venv` del repo.
 - Conexión al teléfono (`plugin-data\minimal-bridge\config.json`): `http://127.0.0.1:8765/api/v1/ingest`, que es el **túnel ADB** (`adb forward tcp:8765 tcp:8765`). Con el teléfono por USB/ADB y el launcher abierto, se conecta solo. La IP LAN anterior (`192.168.3.164`) está en el respaldo `%APPDATA%\Nook.legacy-20261106`.
 - `%APPDATA%\Nook` (copia vieja) quedó renombrada a `Nook.legacy-20261106`. Fenn ya no la usa y se puede borrar.
 
-## Siguiente paso: Fase 1 (aprobaciones desde la isla)
+## Fase 1: aprobaciones desde la isla
 
-1. En `core/agents/`, añadir un receptor HTTP en `127.0.0.1:8787` (`core.protocol.theme.AGENT_HOOKS_PORT`) con token en `FENN_DATA_DIR`.
-2. Arrancarlo desde `claude-agent` (proceso `live`): solicitud → `badge pulse` + `show` + page con Aprobar/Rechazar.
-3. Crear `hooks/` con el hook `PermissionRequest` de Claude Code (tipo `http`) y el de Codex (tipo `command`).
-4. Detalles y reglas en [docs/feasibility.md](docs/feasibility.md#diseño-recomendado-para-las-aprobaciones).
+Cuando Claude Code o Codex piden permiso para una herramienta, la isla se abre con el comando y tres botones: **Aprobar**, **Rechazar** y **Terminal** (no decide y deja que aparezca el diálogo normal). Si no respondes en 120 s, pasa lo mismo que con *Terminal*.
+
+- `ai-agents` escucha en `127.0.0.1:8787` para los dos agentes (el script indica cuál es en `fenn_agent`), con un token por arranque guardado en `plugin-datai-agents\hooks.json`.
+- `hooks/fenn_hook.py` es el comando que ejecutan los agentes. Si Fenn no corre, sale al instante sin decidir.
+- Diseño y límites: [docs/feasibility.md](docs/feasibility.md#diseño-implementado-fase-1).
+
+Registrar los hooks (modifica `~/.claude/settings.json` y `~/.codex/hooks.json`, conserva los demás hooks y guarda un respaldo):
+
+```powershell
+.venv\Scripts\python.exe scripts\install_hooks.py            # ver qué cambiaría
+.venv\Scripts\python.exe scripts\install_hooks.py --apply    # instalar
+.venv\Scripts\python.exe scripts\install_hooks.py --uninstall --apply
+```
+
+En Codex, después de instalar, abre `codex` y usa `/hooks` para revisar y confiar en los hooks nuevos.
+
+Probar sin un agente (abre la isla con una solicitud falsa):
+
+```powershell
+'{"hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{"command":"echo hola"}}' | .venv\Scripts\python.exe hooks\fenn_hook.py claude
+```
 
 ## Tests
 

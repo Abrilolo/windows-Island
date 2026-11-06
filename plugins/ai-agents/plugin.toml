@@ -1,0 +1,9 @@
+id = "ai-agents"
+name = "AI Agents"
+icon = "robot"
+size = "large"
+mode = "live"
+hotkey = "Ctrl+Alt+Shift+A"
+page_size = [536, 420]
+description = "Claude Code, Codex y Gemini: actividad, sesiones y aprobaciones desde la isla."
+run = ["python", "main.py"]

@@ -10,7 +10,7 @@
 .EXAMPLE
     .\scripts\deploy.ps1                          # solo minimal-bridge (comportamiento anterior)
 .EXAMPLE
-    .\scripts\deploy.ps1 -Plugin claude-agent,codex-agent
+    .\scripts\deploy.ps1 -Plugin ai-agents,minimal-bridge
 .EXAMPLE
     .\scripts\deploy.ps1 -All
 #>
@@ -76,7 +76,12 @@ foreach ($Id in $Plugin) {
 
         # Carpeta limpia: evita restos de layouts anteriores (p. ej. el antiguo src/)
         if (Test-Path $TargetDir) {
-            Remove-Item -Path $TargetDir -Recurse -Force
+            try {
+                Remove-Item -Path $TargetDir -Recurse -Force -ErrorAction Stop
+            } catch {
+                Write-Host "  !! $Id está en uso (Fenn lo está ejecutando). Cierra Fenn y vuelve a desplegar." -ForegroundColor Red
+                exit 1
+            }
         }
         New-Item -ItemType Directory -Force -Path $DataDir | Out-Null
 

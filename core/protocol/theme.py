@@ -30,4 +30,4 @@ STATUS_ICON: dict[str, str] = {
 
 # Local ports. 8765 belongs to the phone (Minimal Launcher); never reuse it.
 PHONE_PORT = 8765
-AGENT_HOOKS_PORT = 8787
+AGENT_HOOKS_PORT = 8787  # ai-agents plugin; source of truth: core.agents.hook_server.HOOK_PORT

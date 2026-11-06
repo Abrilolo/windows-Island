@@ -1,4 +1,4 @@
-"""Entrypoint Fenn runs for the Gemini session monitor plugin."""
+"""Entrypoint Fenn runs for the AI Agents plugin (Claude Code, Codex, Gemini)."""
 
 from __future__ import annotations
 
@@ -15,4 +15,4 @@ for _root in (_HERE, _HERE.parents[1]):  # installed copy, then repo checkout
 from core.agents.plugin import run_loop  # noqa: E402
 
 if __name__ == "__main__":
-    run_loop("gemini")
+    run_loop()

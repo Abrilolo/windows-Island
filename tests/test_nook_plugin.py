@@ -242,7 +242,7 @@ def test_connect_button_discovers_phone_updates_clean_status_and_auto_flushes_ou
     tile_offline_str = json.dumps(state.build_tile(), ensure_ascii=False)
     page_offline_str = json.dumps(state.build_page(), ensure_ascii=False)
     assert "○ Conectar" in tile_offline_str
-    assert '"id": "connect"' in tile_offline_str
+    assert '"id": "connect"' in page_offline_str
     assert "○ Conectar" in page_offline_str
     assert '"id": "connect"' in page_offline_str
     assert len(outbox.load_items()) == 1
@@ -269,7 +269,7 @@ def test_connect_button_discovers_phone_updates_clean_status_and_auto_flushes_ou
     tile_online_str = json.dumps(state.build_tile(), ensure_ascii=False)
     page_online_str = json.dumps(state.build_page(), ensure_ascii=False)
     assert "● Conectado" in tile_online_str
-    assert '"id": "connect"' in tile_online_str
+    assert '"id": "connect"' in page_online_str
     assert "● Conectado" in page_online_str
     assert '"id": "connect"' in page_online_str
 
@@ -315,3 +315,51 @@ def test_nota_command_queues_note_without_ollama(tmp_path: Path) -> None:
     body = state.pending_items[0].payload.to_launcher_dict()
     assert body["notes"][0]["category"] == "WORK"
     assert body["notes"][0]["text"] == "revisar PR"
+
+
+def _device_state(tmp_path: Path, url: str, *, online: bool) -> BridgeState:
+    outbox = OutboxStore(data_dir=tmp_path)
+    config = BridgeConfig(phone_ingest_url=url, auto_sync_captures=False)
+    return BridgeState(
+        brain=_StubBrain(),
+        config=config,
+        outbox=outbox,
+        dispatcher=_StubDispatcher(config=config, outbox=outbox, online=online),
+        async_inference=False,
+        auto_discover=False,
+    )
+
+
+def test_device_center_shows_transport_queue_and_last_sync(tmp_path: Path) -> None:
+    state = _device_state(tmp_path, "http://127.0.0.1:8765/api/v1/ingest", online=True)
+    state.handle_message({"type": "event", "id": "quick_capture", "kind": "submit", "value": "/nota hola"})
+
+    tile = json.dumps(state.build_tile(), ensure_ascii=False)
+    page = json.dumps(state.build_page(), ensure_ascii=False)
+    assert "Galaxy S24+" in tile and "USB · ADB" in tile and "1 en cola" in tile
+    assert '"type": "grid"' in page and "Enlace" in page and "1 lote(s)" in page
+    assert '"type": "list"' in page and "note-pencil" in page
+
+    state.handle_message({"type": "event", "id": "sync_phone", "kind": "click"})
+    tile = json.dumps(state.build_tile(), ensure_ascii=False)
+    assert "● Conectado" in tile and "en cola" not in tile and "sync —" not in tile
+    assert state.last_sync_at is not None
+
+
+def test_device_center_wifi_label(tmp_path: Path) -> None:
+    state = _device_state(tmp_path, "http://192.168.3.164:8765/api/v1/ingest", online=False)
+    assert "Wi-Fi · 192.168.3.164" in json.dumps(state.build_tile(), ensure_ascii=False)
+
+
+def test_device_center_views_follow_renderer_rules(tmp_path: Path) -> None:
+    from core.protocol.lint import rows_that_stretch
+
+    state = _device_state(tmp_path, "http://127.0.0.1:8765/api/v1/ingest", online=False)
+    views = [state.build_tile(), state.build_page()]
+    state.handle_message({"type": "event", "id": "quick_capture", "kind": "submit", "value": "Comí pollo"})
+    views += [state.build_tile(), state.build_page()]
+    state.is_analyzing = True
+    views.append(state.build_page())
+    assert rows_that_stretch(views) == []
+    dumped = json.dumps(views)
+    assert "justify" not in dumped and '"muted"' not in dumped

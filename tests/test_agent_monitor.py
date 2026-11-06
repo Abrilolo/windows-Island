@@ -15,7 +15,8 @@ from core.agents.logs import (
 from core.agents.models import SessionSummary, stage_for_tool
 from dataclasses import replace
 
-from core.agents.plugin import AGENTS, AgentMonitorState, SESSION_PREFIX
+from core.agents.plugin import AGENTS, SESSION_PREFIX, AiAgentsState
+from core.protocol.lint import rows_that_stretch
 from core.agents.stats import SessionCache, summarize, within_days
 
 T0 = datetime(2026, 11, 4, 12, 0, 0, tzinfo=timezone.utc)
@@ -158,32 +159,71 @@ def test_cache_reparses_only_on_change(tmp_path: Path) -> None:
     assert len(calls) == 2
 
 
-def test_nook_view_selects_session_and_shows_stages(tmp_path: Path) -> None:
+def _state(tmp_path: Path, now) -> AiAgentsState:
     _claude_fixture(tmp_path / "p" / "abc.jsonl")
     spec = replace(AGENTS["claude"], list_files=lambda: iter_claude_session_files(tmp_path))
-    state = AgentMonitorState(spec, now=lambda: T0 + timedelta(hours=1))
+    empty_codex = replace(AGENTS["codex"], list_files=lambda: [])
+    state = AiAgentsState([spec, empty_codex], now=now)
     state.refresh()
+    return state
 
-    tile = state.build_tile()
-    assert "1 sesiones" in json.dumps(tile, ensure_ascii=False)
+
+def test_view_selects_session_and_shows_stages(tmp_path: Path) -> None:
+    state = _state(tmp_path, lambda: T0 + timedelta(hours=1))
+
+    tile = json.dumps(state.build_tile(), ensure_ascii=False)
+    assert "AI Agents" in tile and "0 activos" in tile
+    assert '"type": "sparkline"' in tile
     assert state.build_badge() == {"type": "badge", "badge": None}
 
     page_text = json.dumps(state.build_page(), ensure_ascii=False)
-    assert f"{SESSION_PREFIX}sess-claude" in page_text
+    session_id = f"{SESSION_PREFIX}claude:sess-claude"
+    assert session_id in page_text
+    assert '"type": "grid"' in page_text and "Claude Code" in page_text and "Codex" in page_text
     assert "Etapas" not in page_text
 
-    assert state.handle_message({"type": "event", "id": f"{SESSION_PREFIX}sess-claude", "kind": "click"})
+    assert state.handle_message({"type": "event", "id": session_id, "kind": "click"})
     detail = json.dumps(state.build_page(), ensure_ascii=False)
     assert "Etapas" in detail
-    assert "1. explorar ×2" in detail
+    assert "explorar ×2" in detail
+    assert '"type": "progress"' in detail
 
     assert state.handle_message({"type": "event", "id": "close_detail", "kind": "click"})
     assert "Etapas" not in json.dumps(state.build_page(), ensure_ascii=False)
 
 
-def test_nook_view_pulses_when_session_is_active(tmp_path: Path) -> None:
+def test_view_shows_active_agents(tmp_path: Path) -> None:
+    """Active session = discreet glyph + "1 activo"; the pulse is reserved for approvals."""
+    state = _state(tmp_path, lambda: T0 + timedelta(seconds=30))
+    assert state.build_badge()["badge"] == {"kind": "glyph", "icon": "robot"}
+    assert "1 activo" in json.dumps(state.build_tile(), ensure_ascii=False)
+    assert sum(state.activity("claude")) > 0 and sum(state.activity("codex")) == 0
+
+
+def test_tile_adapts_to_layout(tmp_path: Path) -> None:
+    state = _state(tmp_path, lambda: T0 + timedelta(hours=1))
+    assert state.handle_message({"type": "layout", "target": "tile", "size": "wide", "width": 104, "height": 36})
+    wide = json.dumps(state.build_tile(), ensure_ascii=False)
+    assert "sparkline" not in wide and "AI Agents" in wide
+    assert not state.handle_message({"type": "layout", "target": "tile", "size": "wide"})
+    state.handle_message({"type": "layout", "target": "tile", "size": "small"})
+    assert "AI Agents" not in json.dumps(state.build_tile(), ensure_ascii=False)
+
+
+def test_no_view_has_rows_that_stretch(tmp_path: Path) -> None:
+    from core.agents.approvals import ApprovalBroker
+
     _claude_fixture(tmp_path / "p" / "abc.jsonl")
-    spec = replace(AGENTS["claude"], list_files=lambda: iter_claude_session_files(tmp_path))
-    state = AgentMonitorState(spec, now=lambda: T0 + timedelta(seconds=30))
+    specs = [replace(AGENTS["claude"], list_files=lambda: iter_claude_session_files(tmp_path)),
+             replace(AGENTS["codex"], list_files=lambda: [])]
+    broker = ApprovalBroker(wait_timeout=5)
+    state = AiAgentsState(specs, now=lambda: T0 + timedelta(seconds=30), broker=broker)
     state.refresh()
-    assert state.build_badge()["badge"] == {"kind": "pulse"}
+    state.selected = ("claude", "sess-claude")
+    views = [state.build_tile(), state.build_page()]
+    broker.submit("claude", {"tool_name": "Bash", "tool_input": {"command": "ls"}, "cwd": "C:/x"})
+    for size in ("large", "wide", "small"):
+        state.tile_size = size
+        views.append(state.build_tile())
+    views.append(state.build_page())
+    assert rows_that_stretch(views) == []

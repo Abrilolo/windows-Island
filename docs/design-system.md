@@ -156,9 +156,55 @@ Animación: enviar un árbol nuevo por frame (≈30/s como máximo) **solo mient
 - Acciones destructivas: siempre un segundo paso (un botón que cambia a "¿Seguro?" o una confirmación en la page).
 - Abrir algo externo: mensaje `open` (URL, archivo o carpeta). Copiar: `copy`.
 
+## Reglas del renderizador (verificadas en el código de Fenn)
+
+Fuente: `crates/modules/src/plugins/view.rs` del repo `Geguchh024/nook`, revisado el 2026-11-06.
+
+1. **Una `row` con `align: "center"` o `"end"` y sin `spacer` ocupa TODA la altura disponible** (egui `left_to_right(Align::Center)`). En un tile empuja lo demás fuera de la vista; en una página con `scroll` se vuelve infinita y la página sale vacía. Por eso nuestro `row()` usa `align="start"` por defecto, y `core.protocol.lint.rows_that_stretch()` lo vigila en los tests de cada plugin.
+2. Para centrar verticalmente un icono con un texto, agrega un `spacer()` al final de la fila y usa `align="center"`. Una fila con `spacer` usa la altura del frame anterior y no se estira.
+3. En una fila, `justify` no existe: Fenn lo ignora. Para empujar elementos a la derecha usa `spacer()`.
+4. `grid` reparte el ancho en celdas iguales, alineadas arriba. Es ideal para tarjetas de dashboard.
+5. `sparkline` y `progress` sin `width` ocupan todo el ancho disponible. La altura por defecto de `sparkline` es 32.
+6. En el panel de Fenn instalado, el tile se dibuja en una celda cuadrada de ~104 pt de contenido. Cabe un encabezado + estado + sparkline de ~24 pt + una fila de iconos.
+7. **No pongas botones en el tile junto a un título.** En ~104 pt el botón se monta encima del texto. El clic en el tile ya abre la página; pon las acciones ahí (tarjeta o `actions` de la cabecera).
+
+## Del mockup a Fenn
+
+Referencia: el mockup de dashboard (secciones A–D con tarjetas). La isla no es un dashboard a pantalla completa: cada tarjeta del mockup se convierte en **un tile** (resumen) más **su página** (detalle).
+
+| Elemento del mockup | En Fenn | Notas |
+|---|---|---|
+| Tarjeta de módulo (AI Agents, Git Control…) | Un plugin: tile `large` + página | Hecho para AI Agents (`plugins/ai-agents`) y Device Center (`plugins/minimal-bridge`). |
+| Título + icono de color | `icon(..., color, fill=True)` + `text(bold)` | Iconos Phosphor; marcas disponibles: `github-logo`, `gitlab-logo`, `google-logo`, `open-ai-logo`, `microsoft-outlook-logo`. No hay logo de Claude, Docker ni VS Code (usamos `asterisk`, `cube`, `code`). |
+| "● 3 activos" | `icon("circle", fill=True, color="green")` + texto + `spacer()` | |
+| Gráfica de línea con área | `sparkline(values, color=...)` | Sin ejes ni puntos; para puntos usa `canvas`. |
+| Gauges CPU/RAM/GPU | `ring(value, label=...)` | Color fijo por anillo, sin degradado. |
+| Barras de progreso de colores (Daily Planner) | `progress(value, color=...)` uno por barra | |
+| Barras verticales (Insights) | `canvas` con `rect` | |
+| Toggle (Automation Hub) | `toggle(id, value)` | |
+| "CI passing", chips de estado | `text` + `icon("check-circle")`; selección con `chips` | No hay "pill" con fondo de color. |
+| Botón "›" / "Ver todos" | Clic en el tile abre la página; `actions` en la cabecera de la página | |
+| Miniatura (Reels, paisaje Workspace) | `image(path=..., rounding=...)` | PNG/JPG/BMP. |
+| Secciones A/B/C/D con encabezado | ❌ | Fenn organiza los tiles en su propia cuadrícula paginada; un plugin no puede agrupar los de otros. Una página "hub" con `grid` podría imitarlo. |
+| Fondo degradado, glow, sombras de color | ❌ | El cristal y el fondo los pone Fenn (tema + acento del usuario). |
+| Barra superior (Fenn · iconos · Activa · hora · avatar) | ❌ | Es la isla de Fenn, no un plugin. |
+
+### Patrón "AI Agents" (implementado)
+
+- **Tile `large`:** `robot` + "AI Agents" / "● N activo(s)" / `sparkline` de tool calls por día (14 días) / iconos de cada agente, encendidos si tuvieron actividad.
+- **Página:** estado / `grid` de 3 tarjetas (icono y color de marca, sesiones y "hace X", sparkline propia, `ring` de % sin errores, tools y tokens) / "Sesiones recientes" con `list` / detalle de etapas con `progress` por etapa. Las aprobaciones pendientes van arriba de todo.
+- Colores de marca: Claude `#D97757`, Codex `#10A37F`, Gemini `#4F8EF7`.
+
+### Patrón "Device Center" (implementado, `plugins/minimal-bridge`)
+
+- **Tile:** `device-mobile` (verde si conectado) + nombre del teléfono / estado / enlace (`usb` "USB · ADB" si la URL es localhost, si no `wifi-high` "Wi-Fi · IP") / `tray` "N en cola" o `clock` "sync HH:MM". Sin botones.
+- **Página:** captura rápida (input) / tarjeta del dispositivo con botón Conectar y `grid` de 3 stats (Enlace, En cola, Última sync) / resultado de la última captura (`check-circle` o `warning-circle`) / cola como `list` con botón "Enviar" / ayuda de comandos en `faint`.
+- El nombre del teléfono sale de `FENN_PHONE_NAME` (por defecto "Galaxy S24+").
+
 ## Checklist antes de desplegar un plugin
 
 - [ ] Pasa el checker de la skill `fenn-plugin` sin errores.
+- [ ] `rows_that_stretch(vistas) == []` en sus tests, sin `justify` ni colores inventados (`muted`).
 - [ ] El tile se lee bien en `small` y `wide` (o el tamaño declarado).
 - [ ] Probado en tema claro y oscuro.
 - [ ] Sin envíos mientras no hay cambios (revisar CPU en reposo).

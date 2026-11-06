@@ -1,13 +1,15 @@
-"""Stateful Nook live plugin connected to `OllamaBrain`, `OutboxStore`, and `PhoneDispatcher`."""
+"""Device Center: stateful Fenn live plugin connected to `OllamaBrain`, `OutboxStore`, and `PhoneDispatcher`."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 import json
 import os
 import sys
 import threading
 from typing import Any, Callable
+from urllib.parse import urlparse
 
 from core.brain.ollama_client import OllamaBrain
 from core.contracts.payload import IngestPayload, NoteCategory, NoteItem
@@ -19,12 +21,18 @@ from core.protocol import (
     card,
     column,
     emit,
+    grid,
+    icon,
+    list_item,
+    list_view,
     page_msg,
     row,
+    spacer,
     text,
     text_input,
     tile_msg,
 )
+from core.protocol.theme import ACCENT, DIM, FAINT
 from core.phone.config import BridgeConfig, DEFAULT_PHONE_PORT, normalize_phone_url
 import core.phone.dispatcher as _dispatcher_mod
 from core.phone.dispatcher import PhoneDispatcher, discover_phone
@@ -72,6 +80,7 @@ PendingItem = QueuedItem
 
 STATUS_CONNECTED = "● Conectado"
 STATUS_DISCONNECTED = "○ Conectar"
+DEVICE_NAME = os.environ.get("FENN_PHONE_NAME", "Galaxy S24+")
 
 
 @dataclass
@@ -95,6 +104,7 @@ class BridgeState:
     last_preview_lines: list[str] = field(default_factory=list)
     last_error: str | None = None
     last_sync_info: str | None = None
+    last_sync_at: datetime | None = None
     input_value: str = ""
     pending_items: list[QueuedItem] = field(default_factory=list)
     _lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
@@ -132,27 +142,54 @@ class BridgeState:
         with self._lock:
             return sum(item.payload.total_items() for item in self.pending_items)
 
+    def _transport(self) -> tuple[str, str]:
+        """(icon, label) for the active phone link: ADB tunnel on localhost, else Wi-Fi."""
+        host = urlparse(self.config.phone_ingest_url).hostname or ""
+        if host in ("127.0.0.1", "localhost", "::1"):
+            return "usb", "USB · ADB"
+        return "wifi-high", (f"Wi-Fi · {host}" if host else "Wi-Fi")
+
+    def _status_line(self) -> tuple[str, str]:
+        """(text, color) for the connection state."""
+        if self.is_syncing:
+            return "◌ Sincronizando…", ACCENT
+        if self.connected:
+            return STATUS_CONNECTED, "green"
+        return STATUS_DISCONNECTED, DIM
+
+    def _last_sync_label(self) -> str:
+        return self.last_sync_at.strftime("%H:%M") if self.last_sync_at else "—"
+
     def build_tile(self) -> dict[str, Any]:
+        """One square cell (~104 pt): no buttons here, they overlap the name. Tap opens the page,
+        whose card and header action reconnect."""
         with self._lock:
-            conn_status = STATUS_CONNECTED if self.connected else STATUS_DISCONNECTED
+            status, status_color = self._status_line()
+            transport_icon, transport = self._transport()
+            queued = len(self.pending_items)
+            if queued:
+                detail_icon, detail = "tray", f"{queued} en cola"
+            else:
+                detail_icon, detail = "clock", f"sync {self._last_sync_label()}"
+
+            def line(glyph: str, value: str, color: str) -> dict[str, Any]:
+                return row([icon(glyph, size=12, color=color), text(value, size="small", color=color, wrap=False)], gap=4)
+
             return tile_msg(
                 column(
                     [
                         row(
                             [
-                                text("Minimal Bridge", size="body", bold=True),
-                                button(
-                                    "connect",
-                                    label="Reconectar" if self.connected else STATUS_DISCONNECTED,
-                                    icon="arrows-clockwise",
-                                ),
+                                icon("device-mobile", size=16, color=status_color),
+                                text(DEVICE_NAME, size="body", bold=True, wrap=False),
                             ],
                             gap=6,
-                            justify="between",
                         ),
-                        text(conn_status, size="small", color="muted"),
+                        text(status, size="small", color=status_color, wrap=False),
+                        line(transport_icon, transport, DIM),
+                        line(detail_icon, detail, ACCENT if queued else DIM),
                     ],
-                    gap=2,
+                    gap=4,
                 )
             )
 
@@ -166,100 +203,138 @@ class BridgeState:
                 return badge_msg(badge_glyph("bell"))
             return badge_msg(None)
 
+    def _device_card(self) -> dict[str, Any]:
+        status, status_color = self._status_line()
+        transport_icon, transport = self._transport()
+        queued = len(self.pending_items)
+
+        def stat(label: str, value: str, glyph: str) -> dict[str, Any]:
+            return card(
+                [
+                    row([icon(glyph, size=12, color=DIM), text(label, size="small", color=DIM)], gap=4),
+                    text(value, size="body", bold=True, wrap=False),
+                ],
+                padding=8,
+                gap=2,
+            )
+
+        return card(
+            [
+                row(
+                    [
+                        icon("device-mobile", size=28, color=status_color),
+                        column(
+                            [
+                                text(DEVICE_NAME, size="body", bold=True, wrap=False),
+                                text(status, size="small", color=status_color, wrap=False),
+                            ],
+                            gap=0,
+                        ),
+                        spacer(),
+                        button(
+                            "connect",
+                            label="Reconectar" if self.connected else "Conectar",
+                            icon="arrows-clockwise",
+                        ),
+                    ],
+                    gap=8,
+                    align="center",
+                ),
+                grid(
+                    3,
+                    [
+                        stat("Enlace", transport, transport_icon),
+                        stat("En cola", f"{queued} lote(s)" if queued else "vacía", "tray"),
+                        stat("Última sync", self._last_sync_label(), "clock"),
+                    ],
+                    gap=6,
+                ),
+            ],
+            padding=10,
+            gap=8,
+        )
+
     def build_page(self) -> dict[str, Any]:
         with self._lock:
-            conn_status = STATUS_CONNECTED if self.connected else STATUS_DISCONNECTED
-            # The input goes first (as in the other Nook plugins): it renders reliably at the top.
+            # The input goes first (as in the other Fenn plugins): it renders reliably at the top.
             children: list[dict[str, Any]] = [
                 text_input(
                     "quick_capture",
                     value=self.input_value,
                     hint="Ej. Comí 200g de pollo... · /nota [trabajo:] texto → Notas",
                 ),
-                row(
-                    [
-                        text(conn_status, size="small", bold=True),
-                        button(
-                            "connect",
-                            label="Reconectar" if self.connected else STATUS_DISCONNECTED,
-                            icon="arrows-clockwise",
-                        ),
-                    ],
-                    gap=8,
-                    justify="between",
-                ),
+                self._device_card(),
             ]
 
             if self.is_analyzing:
                 children.append(
                     card(
                         [
-                            text(
-                                f"🧠 Clasificando con Ollama ({self.brain.model})...",
-                                size="small",
-                                bold=True,
+                            row(
+                                [
+                                    icon("brain", size=14, color=ACCENT),
+                                    text(f"Clasificando con Ollama ({self.brain.model})…", size="small", bold=True),
+                                ],
+                                gap=6,
                             ),
-                            text(self.last_capture, size="small", color="muted"),
+                            text(self.last_capture, size="small", color=DIM),
                         ],
                         padding=8,
                         gap=4,
                     )
                 )
             elif self.last_preview_lines:
-                header = (
-                    "⚠️ Captura guardada en modo fallback (Ollama offline):"
-                    if self.last_error
-                    else "✨ Última captura clasificada (Room v6):"
-                )
+                if self.last_error:
+                    glyph, color, header = "warning-circle", "orange", "Guardado sin IA (Ollama offline)"
+                else:
+                    glyph, color, header = "check-circle", "green", "Última captura clasificada"
                 preview_nodes: list[dict[str, Any]] = [
-                    text(header, size="small", bold=True)
+                    row([icon(glyph, size=14, color=color), text(header, size="small", bold=True)], gap=6)
                 ]
                 for line in self.last_preview_lines[:5]:
                     preview_nodes.append(text(line, size="small", mono=True))
                 children.append(card(preview_nodes, padding=8, gap=4))
 
             if self.pending_items:
-                inbox_rows: list[dict[str, Any]] = [
-                    text(
-                        f"Cola Offline para S24+ ({len(self.pending_items)} lote(s)):",
-                        size="small",
-                        bold=True,
-                    )
-                ]
-                shown_lines = 0
+                items: list[dict[str, Any]] = []
                 for item in self.pending_items:
-                    for s_line in item.summary_lines:
-                        if shown_lines >= 5:
+                    glyph = "note-pencil" if item.source == "note" else "tray"
+                    for index, s_line in enumerate(item.summary_lines):
+                        if len(items) >= 5:
                             break
-                        inbox_rows.append(
-                            row(
-                                [text(f"• {s_line}", size="small")],
-                                gap=6,
-                            )
-                        )
-                        shown_lines += 1
-                    if shown_lines >= 5:
+                        items.append(list_item(f"queue:{item.id}:{index}", s_line, icon=glyph))
+                    if len(items) >= 5:
                         break
-
-                inbox_rows.append(
-                    row(
+                children.append(
+                    card(
                         [
-                            button(
-                                "sync_phone",
-                                label="Enviar todo al S24+",
-                                icon="paper-plane-tilt",
-                                primary=True,
+                            text(
+                                f"Cola para el {DEVICE_NAME} ({len(self.pending_items)} lote(s))",
+                                size="small",
+                                bold=True,
                             ),
-                            button(
-                                "clear_inbox",
-                                label="Limpiar",
-                                icon="trash",
+                            list_view(items),
+                            row(
+                                [
+                                    button(
+                                        "sync_phone",
+                                        label=f"Enviar al {DEVICE_NAME}",
+                                        icon="paper-plane-tilt",
+                                        primary=True,
+                                    ),
+                                    button("clear_inbox", label="Limpiar", icon="trash"),
+                                ],
+                                gap=8,
                             ),
                         ],
-                        gap=8,
+                        padding=8,
+                        gap=6,
                     )
                 )
-                children.append(card(inbox_rows, padding=8, gap=6))
+
+            children.append(
+                text("/ip <dirección> cambia el destino · /nota guarda directo en Notas", size="small", color=FAINT)
+            )
 
             return page_msg(
                 column(children, gap=8, scroll=True),
@@ -267,7 +342,7 @@ class BridgeState:
                     {
                         "id": "connect",
                         "icon": "arrows-clockwise",
-                        "tooltip": "Reconectar S24+",
+                        "tooltip": f"Reconectar {DEVICE_NAME}",
                     }
                 ],
             )
@@ -426,6 +501,7 @@ class BridgeState:
             self.is_syncing = False
             self.pending_items = self.outbox.load_items()
             if result.delivered:
+                self.last_sync_at = datetime.now()
                 self.connected = True
                 self.status_text = STATUS_CONNECTED
                 self.last_sync_info = STATUS_CONNECTED

@@ -1,6 +1,6 @@
 id = "minimal-bridge"
-name = "Minimal Bridge"
-icon = "paper-plane-tilt"
+name = "Device Center"
+icon = "device-mobile"
 size = "wide"
 mode = "live"
 hotkey = "Ctrl+Alt+Space"
