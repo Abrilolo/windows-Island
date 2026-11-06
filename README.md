@@ -1,10 +1,46 @@
 # nook-bridge
 
-Puente local (Windows -> Android `Minimal Launcher`) para la barra flotante **Nook / Fenn** (`nooknotch.xyz`) con inferencia local bajo demanda vía **Ollama**.
+Plugins locales para la barra flotante **Fenn** (antes Nook, <https://fenn.click>): puente Windows → Android `Minimal Launcher`, monitores de agentes de IA e inferencia local bajo demanda vía **Ollama**.
 
-## Conexión reutilizable al Galaxy S24+ (`src/sync/phone_connector.py`)
+Antes de implementar algo nuevo, lee:
 
-Cualquier plugin de Nook/Fenn puede conectarse y enviar datos al Galaxy S24+ (`Minimal Launcher` en el puerto `8765`) importando las funciones de `sync` (o `sync.phone_connector`), sin depender de `OutboxStore` ni del estado interno de `minimal-bridge`.
+- [docs/fenn-platform.md](docs/fenn-platform.md): qué permite Fenn y qué no.
+- [docs/feasibility.md](docs/feasibility.md): qué se puede implementar de cada módulo.
+- [docs/design-system.md](docs/design-system.md): pill / tile / page con componentes de Fenn.
+- [IDEA.md](IDEA.md): visión, módulos y roadmap.
+
+## Estructura
+
+```
+core/                     # librería compartida que importan todos los plugins
+├── protocol/             # builders del protocolo JSON-Lines de Fenn + theme.py
+├── contracts/            # payload.py (Room v6, Android) + schemas.py (DTOs de plugins/engine)
+├── phone/                # conexión y envío al Galaxy S24+ (UDP → HTTP → ADB)
+├── brain/                # cliente Ollama
+├── agents/               # parsers de sesiones Claude / Codex / Gemini + plugin monitor
+└── mail/                 # (pendiente) escáner IMAP
+plugins/                  # una carpeta = un plugin de Fenn (plugin.toml + main.py)
+├── minimal-bridge/       # notas rápidas → Ollama → Minimal Launcher
+├── claude-agent/         # monitor de sesiones de Claude Code
+├── codex-agent/          # monitor de sesiones de Codex
+└── gemini-agent/         # monitor de sesiones de Gemini
+scripts/                  # deploy, setup, utilidades
+tests/
+docs/
+```
+
+Cada `plugins/<id>/main.py` busca `core/` junto a sí mismo (copia instalada) o dos niveles arriba (repo), así que funciona igual desplegado o desde el checkout.
+
+### Agregar un plugin nuevo
+
+1. Crea `plugins/<id>/plugin.toml` (el `id` debe coincidir con el nombre de la carpeta) y `plugins/<id>/main.py` copiando el bloque de arranque de cualquier otro plugin.
+2. Pon la lógica reutilizable en `core/` y la específica del plugin en `plugins/<id>/<paquete>/`.
+3. `tests/test_plugin_layout.py` valida el manifiesto y que los ids y hotkeys no se repitan.
+4. Despliega con `.\scripts\deploy.ps1 -Plugin <id>`.
+
+## Conexión reutilizable al Galaxy S24+ (`core/phone/`)
+
+Cualquier plugin puede conectarse y enviar datos al Galaxy S24+ (`Minimal Launcher` en el puerto `8765`) importando `core.phone`, sin depender de `OutboxStore` ni del estado interno de `minimal-bridge`.
 
 ### Estrategia de conexión en 3 niveles (`connect_to_phone`)
 
@@ -15,7 +51,7 @@ Cualquier plugin de Nook/Fenn puede conectarse y enviar datos al Galaxy S24+ (`M
 ### Ejemplo de uso desde cualquier otro plugin
 
 ```python
-from sync import connect_to_phone, post_to_phone, send_message_to_phone
+from core.phone import connect_to_phone, post_to_phone, send_message_to_phone
 
 # 1. Conectar y consultar el estado / transporte usado ("udp", "http", "adb" o "offline")
 conn = connect_to_phone()
@@ -29,8 +65,33 @@ ok, err = send_message_to_phone("Sesión de agente finalizada", source="Claude")
 ok, err = post_to_phone({"notes": [{"category": "WORK", "text": "Revisar PR"}]})
 ```
 
-### Despliegue en Nook / Fenn
+## Despliegue en Fenn
 
 ```powershell
-.\scripts\deploy.ps1
+.\scripts\deploy.ps1                                  # solo minimal-bridge
+.\scripts\deploy.ps1 -Plugin claude-agent,codex-agent # plugins concretos
+.\scripts\deploy.ps1 -All                             # todos los de plugins/
+```
+
+Copia `plugins/<id>/` + `core/` a `%APPDATA%\Fenn\plugins\<id>` y apunta `run` al Python del `.venv`.
+
+Destino único: `%APPDATA%\Fenn\plugins`. Los datos (`%APPDATA%\Fenn\plugin-data\<id>`) no se tocan al desplegar, así que la configuración del teléfono se conserva.
+
+## Estado del entorno (2026-11-06)
+
+- Instalados en Fenn desde este repo: `minimal-bridge`, `claude-agent` y `codex-agent`, todos con el `.venv` del repo. `gemini-agent` existe en el repo pero no está desplegado.
+- Conexión al teléfono (`plugin-data\minimal-bridge\config.json`): `http://127.0.0.1:8765/api/v1/ingest`, que es el **túnel ADB** (`adb forward tcp:8765 tcp:8765`). Con el teléfono por USB/ADB y el launcher abierto, se conecta solo. La IP LAN anterior (`192.168.3.164`) está en el respaldo `%APPDATA%\Nook.legacy-20261106`.
+- `%APPDATA%\Nook` (copia vieja) quedó renombrada a `Nook.legacy-20261106`. Fenn ya no la usa y se puede borrar.
+
+## Siguiente paso: Fase 1 (aprobaciones desde la isla)
+
+1. En `core/agents/`, añadir un receptor HTTP en `127.0.0.1:8787` (`core.protocol.theme.AGENT_HOOKS_PORT`) con token en `FENN_DATA_DIR`.
+2. Arrancarlo desde `claude-agent` (proceso `live`): solicitud → `badge pulse` + `show` + page con Aprobar/Rechazar.
+3. Crear `hooks/` con el hook `PermissionRequest` de Claude Code (tipo `http`) y el de Codex (tipo `command`).
+4. Detalles y reglas en [docs/feasibility.md](docs/feasibility.md#diseño-recomendado-para-las-aprobaciones).
+
+## Tests
+
+```powershell
+uv run pytest
 ```

@@ -1,0 +1,7 @@
+id = "claude-agent"
+name = "Claude Monitor"
+icon = "robot"
+size = "wide"
+mode = "live"
+hotkey = "Ctrl+Alt+Shift+C"
+run = ["python", "main.py"]

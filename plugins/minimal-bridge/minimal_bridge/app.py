@@ -9,8 +9,9 @@ import sys
 import threading
 from typing import Any, Callable
 
-from brain.ollama_client import OllamaBrain
-from nook_plugin.protocol import (
+from core.brain.ollama_client import OllamaBrain
+from core.contracts.payload import IngestPayload, NoteCategory, NoteItem
+from core.protocol import (
     badge_glyph,
     badge_msg,
     badge_ring,
@@ -24,11 +25,11 @@ from nook_plugin.protocol import (
     text_input,
     tile_msg,
 )
-from sync.config import BridgeConfig, DEFAULT_PHONE_PORT, normalize_phone_url
-import sync.dispatcher as _dispatcher_mod
-from sync.dispatcher import PhoneDispatcher, discover_phone
-from sync.outbox import OutboxStore, QueuedItem
-from sync.phone_connector import (
+from core.phone.config import BridgeConfig, DEFAULT_PHONE_PORT, normalize_phone_url
+import core.phone.dispatcher as _dispatcher_mod
+from core.phone.dispatcher import PhoneDispatcher, discover_phone
+from core.phone.outbox import OutboxStore, QueuedItem
+from core.phone.phone_connector import (
     PhoneConnection,
     connect_to_phone,
     post_to_phone,
@@ -36,6 +37,35 @@ from sync.phone_connector import (
 )
 
 _ORIGINAL_DISCOVER_PHONE = discover_phone
+
+# `/nota [categoria:] texto` guarda directo en el módulo Notas del S24+ (sin Ollama).
+_NOTE_COMMAND = "/nota"
+_NOTE_CATEGORY_ALIASES: dict[str, NoteCategory] = {
+    "general": NoteCategory.GENERAL,
+    "trabajo": NoteCategory.WORK,
+    "work": NoteCategory.WORK,
+    "ideas": NoteCategory.IDEAS,
+    "finanzas": NoteCategory.FINANCES,
+    "dieta": NoteCategory.DIET,
+    "escuela": NoteCategory.SCHOOL,
+    "ejercicio": NoteCategory.EXERCISE,
+    "comida": NoteCategory.FOOD,
+}
+
+
+def parse_note_command(value: str) -> tuple[NoteCategory, str] | None:
+    """Parse `/nota [categoria:] texto`. Returns None if `value` is not a note command."""
+    lowered = value.lower()
+    if lowered != _NOTE_COMMAND and not lowered.startswith(_NOTE_COMMAND + " "):
+        return None
+    body = value[len(_NOTE_COMMAND):].strip()
+    category = NoteCategory.GENERAL
+    head, sep, rest = body.partition(":")
+    if sep and head.strip().lower() in _NOTE_CATEGORY_ALIASES:
+        category = _NOTE_CATEGORY_ALIASES[head.strip().lower()]
+        body = rest.strip()
+    return category, body
+
 
 # Re-export PendingItem alias for backwards compatibility
 PendingItem = QueuedItem
@@ -139,7 +169,13 @@ class BridgeState:
     def build_page(self) -> dict[str, Any]:
         with self._lock:
             conn_status = STATUS_CONNECTED if self.connected else STATUS_DISCONNECTED
+            # The input goes first (as in the other Nook plugins): it renders reliably at the top.
             children: list[dict[str, Any]] = [
+                text_input(
+                    "quick_capture",
+                    value=self.input_value,
+                    hint="Ej. Comí 200g de pollo... · /nota [trabajo:] texto → Notas",
+                ),
                 row(
                     [
                         text(conn_status, size="small", bold=True),
@@ -151,11 +187,6 @@ class BridgeState:
                     ],
                     gap=8,
                     justify="between",
-                ),
-                text_input(
-                    "quick_capture",
-                    value=self.input_value,
-                    hint="Ej. Comí 200g de pollo, gasté 120 en café y pagar la luz 18:00",
                 ),
             ]
 
@@ -337,6 +368,38 @@ class BridgeState:
         if self.on_async_update is not None:
             self.on_async_update(self)
 
+    def _complete_note(self, text_value: str, category: NoteCategory) -> None:
+        """Queue a note for the Galaxy S24+ Notes module (no LLM), then auto-dispatch if enabled."""
+        payload = IngestPayload(
+            source="nook-desktop",
+            notes=[NoteItem(category=category, text=text_value)],
+        )
+        with self._lock:
+            self._capture_seq += 1
+            queued_item = self.outbox.enqueue(
+                raw_text=text_value,
+                payload=payload,
+                source="note",
+                item_id=f"note_{self._capture_seq}_{payload.sentAt}",
+            )
+            self.pending_items = self.outbox.load_items()
+            self.last_preview_lines = payload.format_preview_lines()
+            self.last_error = None
+
+        if self.config.auto_sync_captures and self.dispatcher is not None:
+            with self._lock:
+                self.is_syncing = True
+            if self.on_async_update is not None:
+                self.on_async_update(self)
+            self._execute_sync()
+            return
+
+        with self._lock:
+            self.last_sync_info = f"📝 Nota en cola ({queued_item.id})"
+            self.status_text = STATUS_CONNECTED if self.connected else STATUS_DISCONNECTED
+        if self.on_async_update is not None:
+            self.on_async_update(self)
+
     def _execute_sync(self) -> None:
         """Flush `outbox.json` to the Galaxy S24+ and update UI state."""
         assert self.dispatcher is not None
@@ -402,6 +465,19 @@ class BridgeState:
                         self.config.save(self.outbox.data_dir)
                         self.input_value = ""
                         self.status_text = STATUS_CONNECTED if self.connected else STATUS_DISCONNECTED
+                    return True
+
+                note = parse_note_command(value)
+                if note is not None:
+                    category, note_text = note
+                    with self._lock:
+                        self.input_value = ""
+                    if not note_text:
+                        return True
+                    if self.async_inference:
+                        self._spawn_worker(self._complete_note, note_text, category)
+                    else:
+                        self._complete_note(note_text, category)
                     return True
 
                 with self._lock:

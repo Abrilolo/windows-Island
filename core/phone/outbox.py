@@ -11,8 +11,8 @@ import uuid
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from contracts.payload import IngestPayload
-from sync.config import get_plugin_data_dir
+from core.contracts.payload import IngestPayload
+from core.phone.config import get_plugin_data_dir
 
 
 class QueuedItem(BaseModel):

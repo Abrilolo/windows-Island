@@ -8,8 +8,8 @@ import json
 import urllib.error
 from typing import Any
 
-from brain.ollama_client import OllamaBrain
-from contracts.payload import FinanceKind, NoteCategory
+from core.brain.ollama_client import OllamaBrain
+from core.contracts.payload import FinanceKind, NoteCategory
 
 
 class _FakeHTTPResponse:

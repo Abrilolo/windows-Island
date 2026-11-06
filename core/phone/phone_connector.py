@@ -21,8 +21,8 @@ from typing import Any
 import urllib.error
 import urllib.request
 
-from contracts.payload import IngestPayload
-from sync.config import (
+from core.contracts.payload import IngestPayload
+from core.phone.config import (
     BridgeConfig,
     DEFAULT_PHONE_PORT,
     build_phone_health_url,
@@ -88,8 +88,8 @@ def _extract_ip_from_url(url: str) -> str | None:
 
 
 def _resolve_health_fn():
-    """Respect monkeypatches on either `sync.dispatcher.ping_phone_health` or `sync.phone_connector.ping_phone_health`."""
-    disp_mod = sys.modules.get("sync.dispatcher")
+    """Respect monkeypatches on either `core.phone.dispatcher.ping_phone_health` or `core.phone.phone_connector.ping_phone_health`."""
+    disp_mod = sys.modules.get("core.phone.dispatcher")
     if disp_mod is not None:
         candidate = getattr(disp_mod, "ping_phone_health", None)
         if candidate is not None and candidate is not ping_phone_health:

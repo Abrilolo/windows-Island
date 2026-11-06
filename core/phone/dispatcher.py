@@ -8,15 +8,15 @@ from pathlib import Path
 import urllib.error
 import urllib.request
 
-from contracts.payload import IngestPayload
-from sync.config import (
+from core.contracts.payload import IngestPayload
+from core.phone.config import (
     BridgeConfig,
     DEFAULT_PHONE_PORT,
     build_phone_health_url,
     build_phone_ingest_url,
 )
-from sync.outbox import OutboxStore, QueuedItem
-from sync.phone_connector import (
+from core.phone.outbox import OutboxStore, QueuedItem
+from core.phone.phone_connector import (
     BROADCAST_ADDR,
     DISCOVER_MAGIC,
     PhoneConnection,

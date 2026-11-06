@@ -1,0 +1,7 @@
+id = "gemini-agent"
+name = "Gemini Monitor"
+icon = "sparkle"
+size = "wide"
+mode = "live"
+hotkey = "Ctrl+Alt+Shift+G"
+run = ["python", "main.py"]

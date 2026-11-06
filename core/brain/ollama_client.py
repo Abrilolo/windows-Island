@@ -10,8 +10,8 @@ import urllib.error
 import urllib.request
 from typing import Any
 
-from brain.prompts import build_system_prompt
-from contracts.payload import (
+from core.brain.prompts import build_system_prompt
+from core.contracts.payload import (
     IngestPayload,
     LLMExtractionResult,
     NoteCategory,

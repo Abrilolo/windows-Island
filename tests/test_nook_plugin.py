@@ -8,19 +8,20 @@ from pathlib import Path
 import subprocess
 import sys
 
-from brain.ollama_client import AnalysisOutcome, OllamaBrain
-from contracts.payload import (
+from core.brain.ollama_client import AnalysisOutcome, OllamaBrain
+from core.contracts.payload import (
     FinanceItem,
     FinanceKind,
     IngestPayload,
+    NoteCategory,
     MealItem,
     ReminderItem,
     ReminderPriority,
 )
-from nook_plugin.main import BridgeState
-from sync.config import BridgeConfig
-from sync.dispatcher import DispatchResult, PhoneDispatcher
-from sync.outbox import OutboxStore
+from minimal_bridge.app import BridgeState
+from core.phone.config import BridgeConfig
+from core.phone.dispatcher import DispatchResult, PhoneDispatcher
+from core.phone.outbox import OutboxStore
 
 
 class _StubBrain(OllamaBrain):
@@ -165,7 +166,7 @@ def test_stdio_live_process_roundtrip(tmp_path: Path) -> None:
     env["NOOK_BRIDGE_DATA_DIR"] = str(tmp_path)
 
     proc = subprocess.Popen(
-        [sys.executable, str(repo_root / "main.py")],
+        [sys.executable, str(repo_root / "plugins" / "minimal-bridge" / "main.py")],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -225,7 +226,7 @@ def test_connect_button_discovers_phone_updates_clean_status_and_auto_flushes_ou
         discover_calls.append(1)
         return discovered_ip[0]
 
-    monkeypatch.setattr("sync.dispatcher.discover_phone", fake_discover)
+    monkeypatch.setattr("core.phone.dispatcher.discover_phone", fake_discover)
 
     # 1) Startup triggers discover_phone() -> offline -> shows "○ Conectar" and button id="connect"
     state = BridgeState(
@@ -271,3 +272,46 @@ def test_connect_button_discovers_phone_updates_clean_status_and_auto_flushes_ou
     assert '"id": "connect"' in tile_online_str
     assert "● Conectado" in page_online_str
     assert '"id": "connect"' in page_online_str
+
+
+def test_nota_command_parses_category_and_text() -> None:
+    from minimal_bridge.app import parse_note_command
+
+    assert parse_note_command("/nota comprar leche") == (NoteCategory.GENERAL, "comprar leche")
+    assert parse_note_command("/nota trabajo: revisar PR") == (NoteCategory.WORK, "revisar PR")
+    # Unknown prefix stays part of the text
+    assert parse_note_command("/nota reunion: 5pm") == (NoteCategory.GENERAL, "reunion: 5pm")
+    assert parse_note_command("/nota") == (NoteCategory.GENERAL, "")
+    assert parse_note_command("/notas algo") is None
+    assert parse_note_command("Comí 200g de pollo") is None
+
+
+def test_nota_command_queues_note_without_ollama(tmp_path: Path) -> None:
+    class _ExplodingBrain(OllamaBrain):
+        def analyze_text(self, user_text: str, **kwargs) -> AnalysisOutcome:
+            raise AssertionError("/nota must not call Ollama")
+
+    outbox = OutboxStore(data_dir=tmp_path)
+    config = BridgeConfig(
+        phone_ingest_url="http://192.168.3.164:8765/api/v1/ingest",
+        auto_sync_captures=False,
+    )
+    state = BridgeState(
+        brain=_ExplodingBrain(),
+        config=config,
+        outbox=outbox,
+        dispatcher=_StubDispatcher(config=config, outbox=outbox, online=False),
+        async_inference=False,
+    )
+
+    changed = state.handle_message(
+        {"type": "event", "id": "quick_capture", "kind": "submit", "value": "/nota trabajo: revisar PR"}
+    )
+    assert changed is True
+    assert len(state.pending_items) == 1
+    notes = state.pending_items[0].payload.notes
+    assert [(n.category, n.text) for n in notes] == [(NoteCategory.WORK, "revisar PR")]
+    assert state.build_badge() == {"type": "badge", "badge": {"kind": "glyph", "icon": "bell"}}
+    body = state.pending_items[0].payload.to_launcher_dict()
+    assert body["notes"][0]["category"] == "WORK"
+    assert body["notes"][0]["text"] == "revisar PR"

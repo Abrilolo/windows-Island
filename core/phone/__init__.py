@@ -1,9 +1,9 @@
 """UDP LAN discovery, ADB tunnel fallback, HTTP dispatcher, and persistent offline outbox queue."""
 
-from sync.config import BridgeConfig, normalize_phone_url
-from sync.dispatcher import DispatchResult, PhoneDispatcher
-from sync.outbox import OutboxStore, QueuedItem
-from sync.phone_connector import (
+from core.phone.config import BridgeConfig, normalize_phone_url
+from core.phone.dispatcher import DispatchResult, PhoneDispatcher
+from core.phone.outbox import OutboxStore, QueuedItem
+from core.phone.phone_connector import (
     PhoneConnection,
     connect_to_phone,
     discover_phone,

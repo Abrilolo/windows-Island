@@ -1,4 +1,4 @@
-"""Unit tests for `OutboxStore`, `BridgeConfig`, and `PhoneDispatcher` (`src/sync/`)."""
+"""Unit tests for `OutboxStore`, `BridgeConfig`, and `PhoneDispatcher` (`core/phone/`)."""
 
 from __future__ import annotations
 
@@ -7,15 +7,15 @@ from pathlib import Path
 from typing import Any
 import urllib.error
 
-from contracts.payload import (
+from core.contracts.payload import (
     FinanceItem,
     FinanceKind,
     IngestPayload,
     NoteCategory,
     NoteItem,
 )
-from sync.config import BridgeConfig, DEFAULT_PHONE_URL, normalize_phone_url
-from sync.dispatcher import (
+from core.phone.config import BridgeConfig, DEFAULT_PHONE_URL, normalize_phone_url
+from core.phone.dispatcher import (
     PhoneConnection,
     PhoneDispatcher,
     _try_adb_forward_phone,
@@ -23,7 +23,7 @@ from sync.dispatcher import (
     discover_phone,
     send_message_to_phone,
 )
-from sync.outbox import OutboxStore
+from core.phone.outbox import OutboxStore
 
 
 def test_default_phone_ip_and_url_normalization(tmp_path: Path) -> None:
@@ -194,7 +194,7 @@ def test_adb_forward_fallback_when_wifi_isolated(monkeypatch) -> None:
         calls.append(" ".join(cmd))
         return _FakeProc()
 
-    monkeypatch.setattr("sync.dispatcher.ping_phone_health", fake_health)
+    monkeypatch.setattr("core.phone.dispatcher.ping_phone_health", fake_health)
     monkeypatch.setattr("subprocess.run", fake_run)
 
     resolved = _try_adb_forward_phone(port=8765, timeout=1.0)
@@ -230,8 +230,8 @@ def test_reusable_connect_to_phone_and_send_message(tmp_path: Path, monkeypatch)
             raise TimeoutError("UDP blocked")
 
     monkeypatch.setattr("socket.socket", lambda *a, **kw: _FakeDeadSocket())
-    monkeypatch.setattr("sync.phone_connector.ping_phone_health", lambda *a, **kw: False)
-    monkeypatch.setattr("sync.phone_connector._try_adb_forward_phone", fake_adb_forward)
+    monkeypatch.setattr("core.phone.phone_connector.ping_phone_health", lambda *a, **kw: False)
+    monkeypatch.setattr("core.phone.phone_connector._try_adb_forward_phone", fake_adb_forward)
 
     cfg = BridgeConfig.load(tmp_path)
     conn = connect_to_phone(config=cfg, data_dir=tmp_path, allow_adb=True)

@@ -1,11 +1,11 @@
-"""Unit tests for the Minimal Launcher Room v6 contracts (`src/contracts/payload.py`)."""
+"""Unit tests for the Minimal Launcher Room v6 contracts (`core/contracts/payload.py`)."""
 
 from __future__ import annotations
 
 import pytest
 from pydantic import ValidationError
 
-from contracts.payload import (
+from core.contracts.payload import (
     FinanceKind,
     IngestPayload,
     LLMExtractionResult,

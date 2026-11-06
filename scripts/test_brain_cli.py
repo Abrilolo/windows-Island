@@ -6,11 +6,11 @@ import json
 from pathlib import Path
 import sys
 
-SRC_DIR = Path(__file__).resolve().parents[1] / "src"
-if str(SRC_DIR) not in sys.path:
-    sys.path.insert(0, str(SRC_DIR))
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
-from brain.ollama_client import OllamaBrain
+from core.brain.ollama_client import OllamaBrain
 
 
 def main() -> None:
